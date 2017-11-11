@@ -1,10 +1,12 @@
-function Record = Main( N_PATTERNS_CLASS, N_CLASSES, N_SPIKES, N_INPUTS, N_HIDDEN, N_OUTPUTS, N_EPISODES, varargin )
-%MAIN Multilayer spiking network (supervised backpropagation) with escape noise
+function Record = MainSingle( N_PATTERNS_CLASS, N_CLASSES, N_SPIKES, N_INPUTS, N_HIDDEN, N_EPISODES, varargin )
+%MAINSINGLE Multilayer spiking network (supervised backpropagation) with escape noise
 % neurons (soft reset) with axonal conduction delays between input and
 % hidden layers
+% Optimised for a single output neuron
+% This code approximates EXP_BETA_O -> infinity for faster runtime
 % Brian Gardner
 % 02/05/16
- 
+
 %%% Set stream for RNG %%%
 if (~isempty(varargin))
     RandStream.setGlobalStream(varargin{1});
@@ -20,12 +22,12 @@ end
 Param = CreateParam();
 
 % Learning rate
-Param.ETA_H = 10 / (N_INPUTS * N_SPIKES * N_OUTPUTS);	% Hidden layer
-Param.ETA_O = 0.1 / N_HIDDEN;                           % Output layer
+Param.ETA_H = 10 / (N_INPUTS * N_SPIKES);	% Hidden layer
+Param.ETA_O = 0.1 / N_HIDDEN;               % Output layer
 
 % Network
 Param.W_H_MAX = 300 / N_INPUTS;	% Max value of initialized hidden weights: <firing_rate> ~ 12 Hz
-Param.W_O_MAX = 30 / N_HIDDEN;	% Max value of initialized output weights: <firing_rate> ~ 1 Hz
+Param.W_O = 12 / N_HIDDEN;      % Same value of initialized output weights: <firing_rate> ~ 1 Hz
 
 % Number of input patterns
 Param.N_PATTERNS = N_PATTERNS_CLASS * N_CLASSES;
@@ -35,9 +37,7 @@ Param.N_PATTERNS = N_PATTERNS_CLASS * N_CLASSES;
 %%%%%%%%%%%%%%%%%%%%%
 
 % Preallocate
-W = cell(2,1);          % Weights
-E_error = cell(2,1);    % Characteristic eligibility
-W_tag = cell(2,1);      % Candidate weight change
+W = cell(2,1);	% Weights
 
 %%% Hidden (first) layer connectivity %%%
 
@@ -46,7 +46,7 @@ D = ceil(Param.D_MAX / Param.DT * rand(N_HIDDEN,N_INPUTS)) * Param.DT;  % Conduc
 
 %%% Output (second) layer connectivity %%%
 
-W{2} = Param.W_O_MAX * rand(N_OUTPUTS,N_HIDDEN);	% Uniform distributed weights: W_oh in (0, W_O_MAX]
+W{2} = Param.W_O * ones(1,N_HIDDEN);  % Same initial weights
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Setup input/target patterns %%%
@@ -64,9 +64,7 @@ end
 
 %%% Create target output patterns %%%
 
-for i = 1:N_OUTPUTS
-    Target(i) = CreateTargetPatterns(N_CLASSES, N_SPIKES, Param);
-end
+Target = CreateTargetPatterns(N_CLASSES, N_SPIKES, Param);
 
 %%%%%%%%%%%%%%%%%%
 %%% Recordings %%%
@@ -80,17 +78,15 @@ Record.ST_h = cell(N_EPISODES,N_HIDDEN);          % Hidden spike train
 % Record.W_h = zeros(N_EPISODES,N_INPUTS,N_HIDDEN); % Input->hidden weight values
 
 % Output neuron
-Record.ST_o = cell(N_EPISODES,N_OUTPUTS);
-% Record.rate_o = zeros(N_EPISODES,N_OUTPUTS);
-% Record.W_o = zeros(N_EPISODES,N_HIDDEN,N_OUTPUTS);
+Record.ST_o = cell(N_EPISODES,1);
+% Record.rate_o = zeros(N_EPISODES,1);
+% Record.W_o = zeros(N_EPISODES,N_HIDDEN);
 
 % Pattern classification
 Record.vRD = zeros(N_EPISODES,1, 'single');     % vRD per output
 Record.perf = zeros(N_EPISODES,1, 'single');	% Performance per output
 % Record.class = cell(N_EPISODES,1);
-for i = 1:N_OUTPUTS
-    Record.ST_ref{i} = Target(i).pattern;
-end
+Record.ST_ref = Target.pattern;
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%% Simulation START %%%%
@@ -99,7 +95,7 @@ end
 for episode = 1:N_EPISODES
     % Print learning epsiode number
     if ~mod(episode,1000)
-        fprintf('\nEpisode %d\n',episode);
+        fprintf('\nEpisode %d\n', episode);
     end
     
     %%% Episodic neuronal initialization %%%
@@ -107,15 +103,12 @@ for episode = 1:N_EPISODES
     % Hidden layer
     Y = false(N_HIDDEN,Param.N_ITERATIONS); % Logical hidden spike train
     reset_h = zeros(N_HIDDEN,1);            % Reset kernel
-    S_trace_M = zeros(N_HIDDEN,N_INPUTS);   % Trace of correlation between input and hidden spike trains (TAU_M component)
-    S_trace_S = zeros(N_HIDDEN,N_INPUTS);   % Trace of correlation between input and hidden spike trains (TAU_S component)
-    W_tag{1} = zeros(N_HIDDEN,N_INPUTS);    % Candidate weight change: W_hi
     
     % Output layer
-    Z = false(N_OUTPUTS,Param.N_ITERATIONS);    % Logical output spike train
-    reset_o = zeros(N_OUTPUTS,1);               % Reset kernel
+    Z = false(1,Param.N_ITERATIONS);            % Logical output spike train
+    reset_o = 0;                                % Reset kernel
     PSP_o_trace = zeros(2,N_HIDDEN);            % PSP at output neurons due to hidden layer: row 1 = TAU_M component, row 2 = TAU_S
-    W_tag{2} = zeros(N_OUTPUTS,N_HIDDEN);       % Candidate weight change: W_oh
+    PSP_o = zeros(Param.N_ITERATIONS,N_HIDDEN);
     
     %%% Select random input / target output training pattern pair %%%
     
@@ -125,10 +118,6 @@ for episode = 1:N_EPISODES
     
     for t_step = 1:Param.N_ITERATIONS
         %%% Update traces %%%
-        
-        % Correlated input->hidden neuron firing
-        S_trace_M = Param.COEFF_TRACE_M * S_trace_M;
-        S_trace_S = Param.COEFF_TRACE_S * S_trace_S;
         
         % Hidden layer neurons
         reset_h = Param.COEFF_TRACE_M * reset_h;
@@ -147,7 +136,7 @@ for episode = 1:N_EPISODES
         
         % Firing intensity
         FI_h = Param.EXP_K * exp(Param.EXP_BETA_H * (u_h - Param.U_THETA));
-        FI_h(FI_h > 1 / Param.DT) = 1 / Param.DT; % Keep probability bound between 0 and 1
+        FI_h(FI_h > 1 / Param.DT) = 1 / Param.DT;   % Keep probability bound between 0 and 1
         
         % Fired
         Y(:,t_step) = rand(N_HIDDEN,1) < FI_h * Param.DT;
@@ -155,62 +144,34 @@ for episode = 1:N_EPISODES
         % Trace updates
         reset_h(Y(:,t_step)) = reset_h(Y(:,t_step)) + Param.RESET_K;                % Reset kernel
         PSP_o_trace(:,Y(:,t_step)) = PSP_o_trace(:,Y(:,t_step)) + Param.PSP_COEFF;  % Update PSP trace
-        PSP_o = PSP_o_trace(1,:) - PSP_o_trace(2,:);                                % PSP evoked at output layer due to hidden neurons
+        PSP_o(t_step,:) = PSP_o_trace(1,:) - PSP_o_trace(2,:);                      % PSP evoked at output layer due to hidden neurons
         
         %%%%%%%%%%%%%%%%%%%%%%%
         %%%% Output neuron %%%%
         %%%%%%%%%%%%%%%%%%%%%%%
         
         % SRM
-        u_o = W{2} * PSP_o' + reset_o;
-        
-        % Firing intensity
-        FI_o = Param.EXP_K * exp(Param.EXP_BETA_O * (u_o - Param.U_THETA));
-        FI_o(FI_o > 1 / Param.DT) = 1 / Param.DT;
+        u_o = sum(W{2} .* PSP_o(t_step,:), 2) + reset_o;
         
         % Fired
-        Z(:,t_step) = rand(N_OUTPUTS,1) < FI_o * Param.DT;
-        
-        % Reset kernel update
-        reset_o(Z(:,t_step)) = reset_o(Z(:,t_step)) + Param.RESET_K;
-        
-        %%%%%%%%%%%%%%%%%%%%%
-        %%%% Eligibility %%%%
-        %%%%%%%%%%%%%%%%%%%%%
-        
-        %%% Output neuron %%%
-        
-        % Backpropagated error signal
-        backprop_error = zeros(N_OUTPUTS,1);
-        for i = 1:N_OUTPUTS
-            backprop_error(i) = Target(i).pattern_logical{class_n}(1,t_step) / Param.DT - FI_o(i); % Learning rate absorbs EXP_BETA_O
+        if u_o > Param.U_THETA
+            Z(t_step) = 1;
+            reset_o = reset_o + Param.RESET_K;
         end
-
-        % Characteristic eligibility
-        E_error{2} = backprop_error * PSP_o;
-        
-        %%% Hidden neurons %%%
-        
-        % Correlated input->hidden firing activity
-        if any(Y(:,t_step))
-            S_trace_M(Y(:,t_step),:) = S_trace_M(Y(:,t_step),:) + Param.PSP_COEFF * PSP_h{pattern_n}(Y(:,t_step),:,t_step);
-            S_trace_S(Y(:,t_step),:) = S_trace_S(Y(:,t_step),:) + Param.PSP_COEFF * PSP_h{pattern_n}(Y(:,t_step),:,t_step);
-        end
-        S_trace = S_trace_M - S_trace_S;
-        
-        % Characteristic eligibility
-        E_error{1} = bsxfun(@times, S_trace, W{2}' * backprop_error); % Learning rate absorbs EXP_BETA_H
-        
-        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-        %%% Candidate weight changes %%%
-        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-        
-        % Hidden neurons
-        W_tag{1} = W_tag{1} + E_error{1};
-        
-        % Output neuron
-        W_tag{2} = W_tag{2} + E_error{2};
     end
+    
+    %%%%%%%%%%%%%%%%%%%%%%%%
+    %%% Network accuracy %%%
+    %%%%%%%%%%%%%%%%%%%%%%%%
+    
+    % Readout spike train
+    ST_out = (find(Z) - 1) * Param.DT;
+    
+    % Error
+    vrdist_out = VRDist(ST_out, Target.pattern{class_n}, Param.TAU_C);
+    
+    % Performance
+    [perf_out, ~] = ReadoutSpatioPerfClass({ST_out}, Target, class_n, N_CLASSES, 1, Param);
     
     %%%%%%%%%%%%%%%%%%%%%%
     %%% Weight updates %%%
@@ -218,8 +179,42 @@ for episode = 1:N_EPISODES
     
     %%% Hidden neurons %%%
     
-    % Eligibility
-    W{1} = W{1} + Param.ETA_H * Param.DT * W_tag{1};
+    ST_h = cell(1,N_HIDDEN);
+    t_step_h = cell(1,N_HIDDEN);
+    for i = 1:N_HIDDEN
+        ST_h{i} = (find(Y(i,:)) - 1) * Param.DT;
+        t_step_h{i} = ST_h{i} / Param.DT + 1;
+    end
+    
+    % Weight change
+    dW = zeros(N_HIDDEN,N_INPUTS);
+    % Potentiation
+    for i = 1:length(Target.pattern{class_n})
+        for j = 1:N_HIDDEN
+            for k = 1:length(ST_h{j})
+                if ST_h{j}(k) < Target.pattern{class_n}(i)
+                    s = ST_h{j}(k) - Target.pattern{class_n}(i);
+                    dW(j,:) = dW(j,:) + Param.PSP_COEFF * (exp(s / Param.TAU_M) - exp(s / Param.TAU_S)) * PSP_h{pattern_n}(j,:,t_step_h{j}(k));
+                else
+                    break
+                end
+            end
+        end
+    end
+    % Depression
+    for i = 1:length(ST_out)
+        for j = 1:N_HIDDEN
+            for k = 1:length(ST_h{j})
+                if ST_h{j}(k) < ST_out(i)
+                    s = ST_h{j}(k) - ST_out(i);
+                    dW(j,:) = dW(j,:) - Param.PSP_COEFF * (exp(s / Param.TAU_M) - exp(s / Param.TAU_S)) * PSP_h{pattern_n}(j,:,t_step_h{j}(k));
+                else
+                    break
+                end
+            end
+        end
+    end
+    W{1} = W{1} + Param.ETA_H * bsxfun(@times, W{2}', dW);
     
     % Synaptic scaling
     W{1} = W{1} + SynapticScaling(sum(Y, 2), W{1}, Param);
@@ -230,32 +225,23 @@ for episode = 1:N_EPISODES
     
     %%% Output neuron %%%
     
-    % Eligibility
-    W{2} = W{2} + Param.ETA_O * Param.DT * W_tag{2};
+    % Weight chage
+    dW = zeros(1,N_HIDDEN);
+    % Potentiation
+    for i = 1:length(Target.pattern{class_n})
+        t_step_o_ref = Target.pattern{class_n}(i) / Param.DT + 1;
+        dW = dW + PSP_o(t_step_o_ref,:);
+    end
+    % Depression
+    for i = 1:length(ST_out)
+        t_step_o = ST_out(i) / Param.DT + 1;
+        dW = dW - PSP_o(t_step_o,:);
+    end
+    W{2} = W{2} + Param.ETA_O * dW;
     
     % Clipping
     W{2}(W{2} > Param.W_MAX) = Param.W_MAX;
-    W{2}(W{2} < -Param.W_MAX) = -Param.W_MAX;
-    
-    %%%%%%%%%%%%%%%%%%%%%%%%
-    %%% Network accuracy %%%
-    %%%%%%%%%%%%%%%%%%%%%%%%
-    
-    % Preallocate
-    ST_out = cell(1,N_OUTPUTS);
-    vrdist_out = zeros(1,N_OUTPUTS);
-    
-    % Error
-    for i = 1:N_OUTPUTS
-        % Spike train
-        ST_out{i} = (find(Z(i,:)) - 1) * Param.DT;
-        
-        % Distance
-        vrdist_out(i) = VRDist(ST_out{i}, Target(i).pattern{class_n}, Param.TAU_C);
-    end
-    
-    % Performance
-    [perf_out, ~] = ReadoutSpatioPerfClass(ST_out, Target, class_n, N_CLASSES, N_OUTPUTS, Param);
+    W{2}(W{2} < 0.01) = 0.01;
     
     %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     %%%% Episodic recordings %%%%
@@ -265,7 +251,7 @@ for episode = 1:N_EPISODES
     
     % Spike train
     for i = 1:N_HIDDEN
-        Record.ST_h{episode,i} = (find(Y(i,:)) - 1) * Param.DT;
+        Record.ST_h{episode,i} = (find(Y(1,:)) - 1) * Param.DT;
     end
     
 %     % Weights
@@ -279,22 +265,20 @@ for episode = 1:N_EPISODES
     %%% Output neuron %%%
     
     % Spike train
-    Record.ST_o(episode,:) = ST_out;
+    Record.ST_o{episode,1} = ST_out;
     
 %     % Weights
-%     for i = 1:N_OUTPUTS
-%         Record.W_o(episode,:,i) = W{2}(i,:);
-%     end
+%     Record.W_o(episode,:) = W{2};
 %     
 %     % Firing rate
-%     Record.rate_o(episode,:) = sum(Z, 2)';
+%     Record.rate_o(episode,1) = sum(Z);
     
     %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     %%%% Classification recordings %%%%
     %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     
-    % Summed vRD w.r.t. target class
-    Record.vRD(episode) = sum(vrdist_out);
+    % vRD w.r.t. target class
+    Record.vRD(episode) = vrdist_out;
     
     % Performance
     Record.perf(episode) = perf_out;

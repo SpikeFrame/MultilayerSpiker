@@ -9,3 +9,6 @@ Runs a simulation with a random initialization and setup:
  - 10 hidden neurons
  - 2 output neurons
  - 1000 learning episodes
+ 
+Optimised code, approximating a sharp firing threshold for a single output neuron, can be run using:
+Record = MainSingle(1, 2, 3, 100, 10, 1000)
